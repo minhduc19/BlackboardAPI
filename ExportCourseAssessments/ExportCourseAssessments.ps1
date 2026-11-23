@@ -51,6 +51,37 @@ function Get-CourseGradebookColumns {
     }
 }
 
+function Add-GradebookCsvFields {
+    param (
+        [pscustomobject]$Value,
+        [System.Collections.Specialized.OrderedDictionary]$Row,
+        [string]$Prefix
+    )
+
+    foreach ($property in $Value.PSObject.Properties) {
+        # Escape literal dots so a property name cannot collide with a nested path.
+        $name = $property.Name.Replace('~', '~0').Replace('.', '~1')
+        $path = "$Prefix$name"
+        $field = $property.Value
+
+        if ($field -is [pscustomobject] -and @($field.PSObject.Properties).Count -gt 0) {
+            Add-GradebookCsvFields -Value $field -Row $Row -Prefix "$path."
+        } elseif ($field -is [array] -or $field -is [pscustomobject]) {
+            $Row[$path] = ConvertTo-Json -InputObject $field -Depth 100 -Compress
+        } elseif ($field -is [datetime] -or $field -is [datetimeoffset]) {
+            $Row[$path] = $field.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        } else {
+            $Row[$path] = [Convert]::ToString($field, [Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+}
+
+function ConvertTo-GradebookCsvLine {
+    param ([string[]]$Cells)
+
+    ($Cells | ForEach-Object { '"' + ([string]$_).Replace('"', '""') + '"' }) -join ','
+}
+
 $inputFile = Get-Item -LiteralPath $CoursesPath
 $outputFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
 $pathComparison = [StringComparison]::Ordinal
@@ -73,7 +104,12 @@ if (!$token) {
 }
 $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
 
-$report = foreach ($course in $courses) {
+$csvHeaders = [System.Collections.Generic.List[string]]::new()
+$csvHeaders.Add('course')
+$seenHeaders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+[void]$seenHeaders.Add('course')
+
+$rows = foreach ($course in $courses) {
     $reference = 'courseId:' + [uri]::EscapeDataString($course)
     if ($course -match '^(courseId|externalId|uuid):(.+)$') {
         $idType = $Matches[1]
@@ -90,14 +126,32 @@ $report = foreach ($course in $courses) {
     }
 
     try {
-        [pscustomobject]@{
-            course = $course
-            assessments = @(Get-CourseGradebookColumns -CourseReference $reference)
+        $columns = @(Get-CourseGradebookColumns -CourseReference $reference)
+        if ($columns.Count -eq 0) {
+            @{ course = $course }
+        }
+        foreach ($column in $columns) {
+            $row = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+            $row.Add('course', $course)
+            Add-GradebookCsvFields -Value $column -Row $row -Prefix 'column.'
+            foreach ($name in $row.Keys) {
+                if ($seenHeaders.Add($name)) {
+                    $csvHeaders.Add($name)
+                }
+            }
+            $row
         }
     } catch {
         throw "Could not export course '${course}': $_"
     }
 }
 
-ConvertTo-Json -InputObject @($report) -Depth 100 |
-    Set-Content -LiteralPath $outputFile -Encoding UTF8
+& {
+    ConvertTo-GradebookCsvLine -Cells ($csvHeaders.ToArray())
+    foreach ($row in $rows) {
+        $cells = foreach ($name in $csvHeaders) {
+            [string]$row[$name]
+        }
+        ConvertTo-GradebookCsvLine -Cells $cells
+    }
+} | Set-Content -LiteralPath $outputFile -Encoding UTF8
