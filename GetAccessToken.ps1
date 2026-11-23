@@ -1,6 +1,7 @@
 function GetAccessToken {
     param (
-        [string]$credentialsPath = ".\credentials.json"
+        [string]$credentialsPath = ".\credentials.json",
+        [string]$baseUrl = "https://bb.reading.ac.uk"
     )
 
     # Read credentials from JSON
@@ -21,8 +22,8 @@ function GetAccessToken {
 
     $body = "grant_type=client_credentials"
 
-    $response = Invoke-RestMethod -Uri "https://bb.reading.ac.uk/learn/api/public/v1/oauth2/token" `
-                                  -Method POST `
+    $response = Invoke-RestMethod -Uri "${baseUrl}/learn/api/public/v1/oauth2/token" `
+                                  -Method POST -MaximumRedirection 0 -ErrorAction Stop `
                                   -Headers $headers `
                                   -Body $body
 
