@@ -20,60 +20,33 @@ if (!$BaseUrl.IsAbsoluteUri -or $BaseUrl.Scheme -ne 'https' -or
 }
 
 $origin = $BaseUrl.GetLeftPart([UriPartial]::Authority)
-$apiPrefix = '/learn/api/public/v1/'
-$assessmentTypes = @(
-    'resource/x-bb-assessment'
-    'resource/x-bb-assignment'
-    'resource/x-bb-asmt-assignment'
-    'resource/x-bb-asmt-survey'
-    'resource/x-bb-asmt-test'
-)
+$apiPrefix = '/learn/api/public/v2/'
 
-function Get-CourseAssessments {
+function Get-CourseGradebookColumns {
     param ([string]$CourseReference)
 
-    $contentsUrl = "${origin}${apiPrefix}courses/$CourseReference/contents"
-    $pending = [System.Collections.Generic.Queue[uri]]::new()
-    $pending.Enqueue([uri]$contentsUrl)
-    $seenItems = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $pageUrl = [uri]"${origin}${apiPrefix}courses/$CourseReference/gradebook/columns"
     $seenPages = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 
-    while ($pending.Count -gt 0) {
-        $pageUrl = $pending.Dequeue()
-        while ($pageUrl) {
-            if ($pageUrl.GetLeftPart([UriPartial]::Authority) -ne $origin -or $pageUrl.UserInfo -or
-                !$pageUrl.AbsolutePath.StartsWith($apiPrefix, [StringComparison]::Ordinal)) {
-                throw 'Blackboard returned a pagination URL outside the configured API.'
-            }
-            if (!$seenPages.Add($pageUrl.AbsoluteUri)) {
-                throw 'Blackboard returned a repeated pagination URL.'
-            }
+    while ($pageUrl) {
+        if ($pageUrl.GetLeftPart([UriPartial]::Authority) -ne $origin -or $pageUrl.UserInfo -or
+            !$pageUrl.AbsolutePath.StartsWith($apiPrefix, [StringComparison]::Ordinal)) {
+            throw 'Blackboard returned a pagination URL outside the configured API.'
+        }
+        if (!$seenPages.Add($pageUrl.AbsoluteUri)) {
+            throw 'Blackboard returned a repeated pagination URL.'
+        }
 
-            $response = Invoke-RestMethod -Uri $pageUrl -Method Get -Headers $headers -MaximumRedirection 0
-            if ($null -eq $response.results) {
-                throw 'Blackboard returned a course contents response without results.'
-            }
-            foreach ($item in $response.results) {
-                if (!$item.id) {
-                    throw 'Blackboard returned a course content item without an ID.'
-                }
-                if (!$seenItems.Add($item.id)) {
-                    continue
-                }
-                if ($item.contentHandler.id -in $assessmentTypes) {
-                    $item
-                }
-                if ($item.hasChildren) {
-                    $childId = [uri]::EscapeDataString($item.id)
-                    $pending.Enqueue([uri]"$contentsUrl/$childId/children")
-                }
-            }
+        $response = Invoke-RestMethod -Uri $pageUrl -Method Get -Headers $headers -MaximumRedirection 0
+        if ($null -eq $response.results) {
+            throw 'Blackboard returned a gradebook columns response without results.'
+        }
+        $response.results
 
-            if ($response.paging.nextPage) {
-                $pageUrl = [uri]::new($pageUrl, [string]$response.paging.nextPage)
-            } else {
-                $pageUrl = $null
-            }
+        if ($response.paging.nextPage) {
+            $pageUrl = [uri]::new($pageUrl, [string]$response.paging.nextPage)
+        } else {
+            $pageUrl = $null
         }
     }
 }
@@ -102,12 +75,14 @@ $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
 
 $report = foreach ($course in $courses) {
     $reference = 'courseId:' + [uri]::EscapeDataString($course)
-    if ($course -match '^(courseId|externalId):(.+)$') {
+    if ($course -match '^(courseId|externalId|uuid):(.+)$') {
         $idType = $Matches[1]
         if ($idType -ieq 'courseId') {
             $idType = 'courseId'
-        } else {
+        } elseif ($idType -ieq 'externalId') {
             $idType = 'externalId'
+        } else {
+            $idType = 'uuid'
         }
         $reference = "${idType}:" + [uri]::EscapeDataString($Matches[2])
     } elseif ($course -cmatch '^_[0-9]+_[0-9]+$') {
@@ -117,7 +92,7 @@ $report = foreach ($course in $courses) {
     try {
         [pscustomobject]@{
             course = $course
-            assessments = @(Get-CourseAssessments -CourseReference $reference)
+            assessments = @(Get-CourseGradebookColumns -CourseReference $reference)
         }
     } catch {
         throw "Could not export course '${course}': $_"
